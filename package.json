@@ -1,0 +1,25 @@
+{
+  "name": "signal-channel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx src/signal.ts",
+    "setup": "npx tsx src/setup.ts",
+    "uninstall": "npx tsx src/uninstall.ts",
+    "link": "npx tsx src/link.ts",
+    "test": "npx tsx --test test/**/*.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "dotenv": "^17.3.1",
+    "qrcode": "^1.5.4",
+    "tar": "^7.5.12",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/qrcode": "^1.5.6",
+    "typescript": "^5.9.3"
+  }
+}
