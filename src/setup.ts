@@ -15,7 +15,7 @@ import { homedir, platform } from "node:os";
 import { get } from "node:https";
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream/promises";
-import tar from "tar";
+import * as tar from "tar";
 import { linkDevice } from "./link.js";
 
 const IS_WIN = platform() === "win32";
