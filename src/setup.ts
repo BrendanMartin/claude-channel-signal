@@ -57,7 +57,18 @@ function checkJava(): void {
 function findSignalCli(): string | null {
   try {
     const out = execSync("signal-cli --version 2>&1", { encoding: "utf8" });
-    if (out.includes("signal-cli")) return "signal-cli";
+    if (out.includes("signal-cli")) {
+      // Resolve to an absolute path so processes spawned by Claude Code
+      // (especially under launchd, where PATH is minimal) can find the binary.
+      try {
+        const which = IS_WIN ? "where" : "which";
+        const resolved = execSync(`${which} signal-cli`, { encoding: "utf8" })
+          .trim()
+          .split("\n")[0];
+        if (resolved && existsSync(resolved)) return resolved;
+      } catch {}
+      return "signal-cli";
+    }
   } catch {}
 
   const bin = IS_WIN
@@ -133,8 +144,38 @@ async function installSignalCli(): Promise<string> {
 
 // --- Step 3: Link device (uses link.ts) ---
 
+/**
+ * Check signal-cli for any already-registered/linked accounts. Returns the
+ * list of phone numbers (e.g. "+15551234567"). Empty array on failure.
+ */
+function findExistingAccounts(signalCliPath: string): string[] {
+  try {
+    const out = execSync(`"${signalCliPath}" listAccounts 2>&1`, { encoding: "utf8" });
+    return Array.from(out.matchAll(/Number:\s*(\+\d+)/g), (m) => m[1]);
+  } catch {
+    return [];
+  }
+}
+
 async function doLinkDevice(signalCliPath: string): Promise<string> {
   step(3, "Link device");
+
+  // If signal-cli already has an account linked, offer to reuse it instead
+  // of creating a duplicate "Claude Code" entry on the user's Signal account.
+  const existing = findExistingAccounts(signalCliPath);
+  if (existing.length > 0 && !process.argv.includes("--force-link")) {
+    log(`  Found existing linked account(s): ${existing.join(", ")}`);
+    if (process.argv.includes("--yes")) {
+      ok(`Using existing account ${existing[0]} (--yes)`);
+      return existing[0];
+    }
+    const answer = await ask(`  Use ${existing[0]}? [Y/n] `);
+    if (answer.toLowerCase() !== "n") {
+      ok(`Using existing account ${existing[0]}`);
+      return existing[0];
+    }
+  }
+
   log("  Get your phone ready — a QR code will open in your browser.");
   log("  Open Signal > Settings > Linked Devices > Link New Device\n");
 
