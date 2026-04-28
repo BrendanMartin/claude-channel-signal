@@ -4,11 +4,28 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { AccessManager } from "./access.js";
 import { SignalTcpClient, type SignalMessage } from "./tcp-client.js";
 import { DaemonManager } from "./daemon.js";
 import { mkdirSync } from "node:fs";
+
+// Permission relay: matches "yes abcde" / "no abcde" verdict replies sent
+// from the channel owner's phone. The 5-letter ID alphabet skips 'l' (per
+// the channels-reference doc) so it never reads as 1/I on a phone. /i
+// tolerates phone autocorrect capitalizing the verdict word.
+const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i;
+
+const PermissionRequestSchema = z.object({
+  method: z.literal("notifications/claude/channel/permission_request"),
+  params: z.object({
+    request_id: z.string(),
+    tool_name: z.string(),
+    description: z.string(),
+    input_preview: z.string(),
+  }),
+});
 
 export function getReplyToolSchema() {
   return {
@@ -182,7 +199,13 @@ async function main() {
     { name: "signal", version: "0.1.0" },
     {
       capabilities: {
-        experimental: { "claude/channel": {} },
+        experimental: {
+          "claude/channel": {},
+          // Opt in to permission relay so Bash/Write/Edit approval prompts
+          // are forwarded to the channel owner's phone in parallel with the
+          // local terminal dialog. Only honored from own account (see below).
+          "claude/channel/permission": {},
+        },
         tools: {},
       },
       instructions: INSTRUCTIONS,
@@ -223,7 +246,42 @@ async function main() {
     };
   });
 
+  // Permission relay: when Claude wants to run a tool that needs approval,
+  // Claude Code calls this notification handler with a 5-letter request_id.
+  // We forward it to the owner's phone via Note to Self; the owner replies
+  // "yes <id>" or "no <id>" and the inbound handler below converts that to
+  // a permission verdict notification.
+  server.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
+    if (!config.signalAccount) return;
+    const text =
+      `Claude wants to run ${params.tool_name}: ${params.description}\n\n` +
+      `Reply "yes ${params.request_id}" or "no ${params.request_id}"`;
+    try {
+      await tcp.send(config.signalAccount, text, config.signalAccount);
+    } catch (err) {
+      console.error(`[signal] Failed to relay permission prompt: ${err}`);
+    }
+  });
+
   tcp.on("message", async (msg: SignalMessage) => {
+    // Permission verdict — only honored from own account (Note to Self).
+    // Anyone else's verdict-shaped reply falls through to the normal chat
+    // path and is gated/forwarded as text. This is the security anchor:
+    // only the channel owner's phone can approve tool execution.
+    if (config.signalAccount && msg.sender === config.signalAccount) {
+      const m = PERMISSION_REPLY_RE.exec(msg.text);
+      if (m) {
+        await server.notification({
+          method: "notifications/claude/channel/permission",
+          params: {
+            request_id: m[2].toLowerCase(),
+            behavior: m[1].toLowerCase().startsWith("y") ? "allow" : "deny",
+          },
+        });
+        return;
+      }
+    }
+
     await routeInboundMessage(
       access,
       msg,
