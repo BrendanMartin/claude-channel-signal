@@ -9,7 +9,7 @@
  * 5. Removes MCP config from ~/.claude.json
  */
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, platform } from "node:os";
 import { createInterface } from "node:readline";
@@ -95,7 +95,7 @@ async function unregisterDevice(): Promise<void> {
   try {
     const dataDir = join(SIGNAL_CLI_DIR, "data");
     if (existsSync(dataDir)) {
-      for (const entry of require("fs").readdirSync(dataDir)) {
+      for (const entry of readdirSync(dataDir)) {
         const d = join(dataDir, entry);
         if (entry.endsWith(".d") && existsSync(d)) {
           try { rmSync(join(d, "account.db-shm"), { force: true }); } catch {}
