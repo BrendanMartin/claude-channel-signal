@@ -150,6 +150,82 @@ export async function routeInboundMessage(
   }
 }
 
+/**
+ * Detects the silent "outbound works, inbound dead" failure.
+ *
+ * Channel notifications are fire-and-forget: when a session isn't launched with
+ * `--dangerously-load-development-channels server:signal`, the harness drops our
+ * `notifications/claude/channel` without any error back to us. The only reliable
+ * evidence is behavioral — an inbound message we handed off never produces a
+ * `reply`/`send` tool call in response, because Claude never saw it.
+ *
+ * We arm a watchdog on each delivery and disarm it on the next tool activity.
+ * If the deadline passes with a delivery still unacknowledged, we warn loudly
+ * (once): to stderr, and — via the caller's onWarn — over Signal itself, the one
+ * path that still works when inbound is broken.
+ */
+export interface ChannelHealthOptions {
+  onWarn: () => void;
+  warnAfterMs?: number;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (token: unknown) => void;
+}
+
+export class ChannelHealthMonitor {
+  private confirmed = false;
+  private warned = false;
+  private deliveryPending = false;
+  private timer: unknown = null;
+  private readonly warnAfterMs: number;
+  private readonly onWarn: () => void;
+  private readonly setTimer: (fn: () => void, ms: number) => unknown;
+  private readonly clearTimer: (token: unknown) => void;
+
+  constructor(opts: ChannelHealthOptions) {
+    this.onWarn = opts.onWarn;
+    this.warnAfterMs = opts.warnAfterMs ?? 45_000;
+    this.setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimer = opts.clearTimer ?? ((t) => clearTimeout(t as ReturnType<typeof setTimeout>));
+  }
+
+  /** Call right after handing an inbound message to the harness. Arms the watchdog. */
+  recordDelivery(): void {
+    if (this.confirmed || this.warned) return; // outcome already known this process
+    this.deliveryPending = true;
+    if (this.timer !== null) return; // already armed — keep the earliest deadline
+    this.timer = this.setTimer(() => {
+      this.timer = null;
+      if (this.confirmed || this.warned || !this.deliveryPending) return;
+      this.warned = true;
+      this.deliveryPending = false;
+      this.onWarn();
+    }, this.warnAfterMs);
+  }
+
+  /**
+   * Call on any reply/send tool activity. Only a delivery that is currently
+   * awaiting acknowledgement confirms channel health — a proactive send with no
+   * pending delivery tells us nothing about the inbound path, so it's ignored.
+   */
+  recordActivity(): void {
+    if (!this.deliveryPending) return;
+    this.confirmed = true;
+    this.deliveryPending = false;
+    if (this.timer !== null) {
+      this.clearTimer(this.timer);
+      this.timer = null;
+    }
+  }
+
+  isConfirmed(): boolean {
+    return this.confirmed;
+  }
+
+  hasWarned(): boolean {
+    return this.warned;
+  }
+}
+
 const INSTRUCTIONS = [
   "This is a Signal messaging channel. The user can message you from their phone via Signal, and you can message them back.",
   "",
@@ -189,12 +265,42 @@ async function main() {
     }
   );
 
+  const health = new ChannelHealthMonitor({
+    // Generous default so slow (heavy-thinking) responses don't trip a false alarm.
+    warnAfterMs: parseInt(process.env.SIGNAL_ACK_TIMEOUT_MS ?? "45000", 10),
+    onWarn: () => {
+      console.error(
+        "[signal] ⚠️  An inbound Signal message was delivered to Claude Code but got no " +
+        "response. This session is almost certainly NOT running as a channel — outbound " +
+        "send works from any session, but inbound requires launching with:\n" +
+        "    claude --dangerously-load-development-channels server:signal\n" +
+        "See the session's cwd/--channels list; regular MCP registration is not enough.",
+      );
+      // Alert the owner over the one path that still works when inbound is dead.
+      if (config.signalAccount) {
+        tcp
+          .send(
+            config.signalAccount,
+            "⚠️ Your message reached signal-cli, but this Claude Code session isn't " +
+            "receiving Signal messages (no response to the last one).\n\n" +
+            "Relaunch it as a channel:\n\nclaude --dangerously-load-development-channels server:signal",
+            config.signalAccount,
+          )
+          .catch(() => {});
+      }
+    },
+  });
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [getReplyToolSchema(), getSendToolSchema()],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+
+    // Any tool call proves Claude can act on what it receives — clears a pending
+    // delivery watchdog and confirms the inbound channel is live for this process.
+    health.recordActivity();
 
     if (name === "send") {
       try {
@@ -235,6 +341,9 @@ async function main() {
             meta: { sender: m.sender, sender_name: m.senderName },
           },
         });
+        // Handed off to the harness. If no tool activity follows, the watchdog
+        // will surface that this session isn't wired to receive channel events.
+        health.recordDelivery();
       },
       async (recipient, text) => {
         await tcp.send(recipient, text, config.signalAccount);
@@ -248,6 +357,16 @@ async function main() {
   daemon.on("error", (err: Error) => console.error(`[daemon] ERROR: ${err.message}`));
   tcp.on("error", (err: Error) => console.error(`[tcp] ERROR: ${err.message}`));
   tcp.on("log", (msg: string) => console.error(`[tcp] ${msg}`));
+
+  // Diagnostic: dump what the client advertised at handshake. Comparing a
+  // channel-mode launch against a plain one here is the fastest way to see how
+  // the harness distinguishes them.
+  server.oninitialized = () => {
+    try {
+      const caps = server.getClientCapabilities();
+      console.error(`[signal] client capabilities: ${JSON.stringify(caps)}`);
+    } catch {}
+  };
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

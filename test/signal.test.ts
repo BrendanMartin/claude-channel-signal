@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { getReplyToolSchema, handleReply, gate, routeInboundMessage } from "../src/signal.js";
+import { getReplyToolSchema, handleReply, gate, routeInboundMessage, ChannelHealthMonitor } from "../src/signal.js";
 import { AccessManager } from "../src/access.js";
 
 describe("Reply tool schema", () => {
@@ -114,6 +114,81 @@ describe("gate", () => {
     gate(access, "+4444444444", "C");
     const result = gate(access, "+5555555555", "D");
     assert.equal(result.action, "drop");
+  });
+});
+
+describe("ChannelHealthMonitor", () => {
+  // Deterministic timer control: capture the scheduled callback and fire it by hand.
+  function makeMonitor(overrides: Partial<{ warnAfterMs: number }> = {}) {
+    let warned = 0;
+    let fire: (() => void) | null = null;
+    const monitor = new ChannelHealthMonitor({
+      warnAfterMs: overrides.warnAfterMs ?? 1000,
+      onWarn: () => { warned++; },
+      setTimer: (fn) => { fire = fn; return 1; },
+      clearTimer: () => { fire = null; },
+    });
+    return {
+      monitor,
+      warnedCount: () => warned,
+      timeout: () => { const f = fire; fire = null; if (f) f(); }, // one-shot, like setTimeout
+      isArmed: () => fire !== null,
+    };
+  }
+
+  it("warns when a delivery is never acknowledged", () => {
+    const h = makeMonitor();
+    h.monitor.recordDelivery();
+    h.timeout();
+    assert.equal(h.warnedCount(), 1);
+    assert.equal(h.monitor.hasWarned(), true);
+  });
+
+  it("does not warn when activity follows a delivery", () => {
+    const h = makeMonitor();
+    h.monitor.recordDelivery();
+    h.monitor.recordActivity();
+    assert.equal(h.isArmed(), false); // timer was cleared
+    h.timeout(); // no-op — nothing armed
+    assert.equal(h.warnedCount(), 0);
+    assert.equal(h.monitor.isConfirmed(), true);
+  });
+
+  it("ignores proactive activity with no pending delivery", () => {
+    const h = makeMonitor();
+    h.monitor.recordActivity(); // proactive send, tells us nothing about inbound
+    h.monitor.recordDelivery();
+    h.timeout();
+    assert.equal(h.warnedCount(), 1); // still warns — the delivery went unacked
+    assert.equal(h.monitor.isConfirmed(), false);
+  });
+
+  it("warns at most once per process", () => {
+    const h = makeMonitor();
+    h.monitor.recordDelivery();
+    h.timeout();
+    h.monitor.recordDelivery(); // second dropped message
+    assert.equal(h.isArmed(), false); // no re-arm after warning
+    h.timeout();
+    assert.equal(h.warnedCount(), 1);
+  });
+
+  it("does not re-arm while a delivery is already pending", () => {
+    const h = makeMonitor();
+    h.monitor.recordDelivery();
+    h.monitor.recordDelivery(); // burst of messages keeps the single deadline
+    h.timeout();
+    assert.equal(h.warnedCount(), 1);
+  });
+
+  it("stays quiet once confirmed, even on later unacked deliveries", () => {
+    const h = makeMonitor();
+    h.monitor.recordDelivery();
+    h.monitor.recordActivity(); // confirmed
+    h.monitor.recordDelivery(); // later message — channel already proven healthy
+    assert.equal(h.isArmed(), false);
+    h.timeout();
+    assert.equal(h.warnedCount(), 0);
   });
 });
 
