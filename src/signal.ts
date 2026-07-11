@@ -21,7 +21,11 @@ export function validateAttachments(
   paths: string[] | undefined,
   root: string,
 ): string[] | undefined {
-  if (!paths || paths.length === 0) return undefined;
+  if (paths === undefined || paths === null) return undefined;
+  if (!Array.isArray(paths) || paths.some((p) => typeof p !== "string")) {
+    throw new Error("attachments must be an array of file path strings");
+  }
+  if (paths.length === 0) return undefined;
   if (!root) return paths;
   const rootReal = realpathSync(resolve(root));
   return paths.map((p) => {
@@ -186,6 +190,28 @@ export async function routeInboundMessage(
   }
 }
 
+/**
+ * Fire a read receipt for a message that reached the session transport.
+ * Honest guarantee: the channel notification was accepted by the MCP stdio
+ * transport — the closest observable point to "the session saw it"; it does
+ * not prove the model consumed the message. Never fired for own-account
+ * (Note-to-Self) messages, and callers only invoke this on the deliver path,
+ * so dropped/pairing-gated senders never get a receipt. If the sender
+ * identifier form ever differs from ownAccount's form (UUID vs E.164), the
+ * mismatch costs a harmless self-receipt — never a missed one.
+ * Fire-and-forget: a receipt failure is logged and cannot affect delivery.
+ */
+export function maybeSendReadReceipt(
+  msg: { sender: string; timestamp: number },
+  ownAccount: string,
+  sendReceiptFn: (recipient: string, targetTimestamp: number) => Promise<unknown>,
+): void {
+  if (!msg.sender || msg.sender === ownAccount) return;
+  sendReceiptFn(msg.sender, msg.timestamp).catch((err) =>
+    console.error(`[signal] read receipt failed: ${err}`),
+  );
+}
+
 const INSTRUCTIONS = [
   "This is a Signal messaging channel. The user can message you from their phone via Signal, and you can message them back.",
   "",
@@ -285,13 +311,7 @@ async function main() {
             meta: { sender: m.sender, sender_name: m.senderName },
           },
         });
-        // Mark as read only when actually delivered into the session —
-        // dropped or pairing-gated messages must not show a filled check.
-        if (m.sender !== config.signalAccount) {
-          tcp.sendReceipt(m.sender, m.timestamp).catch((err) =>
-            console.error(`[signal] read receipt failed: ${err}`),
-          );
-        }
+        maybeSendReadReceipt(m, config.signalAccount, (r, t) => tcp.sendReceipt(r, t));
       },
       async (recipient, text) => {
         await tcp.send(recipient, text, config.signalAccount);

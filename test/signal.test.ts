@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { join, basename } from "node:path";
 import { tmpdir } from "node:os";
-import { getReplyToolSchema, handleReply, gate, routeInboundMessage, validateAttachments } from "../src/signal.js";
+import { getReplyToolSchema, handleReply, gate, routeInboundMessage, validateAttachments, maybeSendReadReceipt } from "../src/signal.js";
 import { AccessManager } from "../src/access.js";
 
 describe("Reply tool schema", () => {
@@ -71,8 +71,39 @@ describe("validateAttachments", () => {
     }
   });
 
+
+  it("rejects non-array attachments input with a clear error", () => {
+    assert.throws(
+      () => validateAttachments("/tmp/x.png" as unknown as string[], ""),
+      /array of file path strings/,
+    );
+  });
+
   it("throws visibly on a missing file when a root is set", () => {
     assert.throws(() => validateAttachments([join(root, "nope.png")], root));
+  });
+});
+
+describe("maybeSendReadReceipt", () => {
+  const msg = { sender: "+1222", timestamp: 123 };
+
+  it("fires with the sender and message timestamp", async () => {
+    let got: [string, number] | null = null;
+    maybeSendReadReceipt(msg, "+1999", async (r, t) => { got = [r, t]; });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(got, ["+1222", 123]);
+  });
+
+  it("never fires for the own account (Note to Self)", async () => {
+    let fired = false;
+    maybeSendReadReceipt({ sender: "+1999", timestamp: 1 }, "+1999", async () => { fired = true; });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(fired, false);
+  });
+
+  it("swallows receipt failures without throwing", async () => {
+    maybeSendReadReceipt(msg, "+1999", async () => { throw new Error("boom"); });
+    await new Promise((r) => setImmediate(r));
   });
 });
 

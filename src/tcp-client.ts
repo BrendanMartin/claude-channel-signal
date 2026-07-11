@@ -53,6 +53,26 @@ export function parseJsonRpcMessage(raw: string): SignalMessage | null {
   }
 }
 
+/**
+ * Params for signal-cli's sendReceipt RPC. NB: unlike send, sendReceipt
+ * requires recipient as a PLAIN STRING — the array form gets mis-parsed as a
+ * phone number and fails with UNREGISTERED_FAILURE (verified live against
+ * signal-cli 0.14.5).
+ */
+export function buildSendReceiptParams(
+  recipient: string,
+  targetTimestamp: number,
+  account?: string,
+): Record<string, unknown> {
+  const params: Record<string, unknown> = {
+    recipient,
+    targetTimestamp,
+    type: "read",
+  };
+  if (account) params.account = account;
+  return params;
+}
+
 export function buildJsonRpcRequest(
   method: string,
   params: Record<string, unknown>
@@ -185,16 +205,10 @@ export class SignalTcpClient extends EventEmitter {
 
   /** Mark an inbound message as read on the sender's device (filled check). */
   async sendReceipt(recipient: string, targetTimestamp: number): Promise<unknown> {
-    // NB: unlike send, signal-cli's sendReceipt requires recipient as a plain
-    // string — an array gets mis-parsed as a phone number (verified live,
-    // signal-cli 0.14.5).
-    const params: Record<string, unknown> = {
-      recipient,
-      targetTimestamp,
-      type: "read",
-    };
-    if (this.account) params.account = this.account;
-    return this.request("sendReceipt", params);
+    return this.request(
+      "sendReceipt",
+      buildSendReceiptParams(recipient, targetTimestamp, this.account),
+    );
   }
 
   private request(method: string, params: Record<string, unknown>): Promise<unknown> {
