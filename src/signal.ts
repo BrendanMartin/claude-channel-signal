@@ -25,6 +25,11 @@ export function getReplyToolSchema() {
           type: "string",
           description: "The message to send",
         },
+        attachments: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional absolute file paths to attach (images display inline)",
+        },
       },
       required: ["recipient", "text"],
     },
@@ -42,6 +47,11 @@ export function getSendToolSchema() {
           type: "string",
           description: "The message to send",
         },
+        attachments: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional absolute file paths to attach (images display inline)",
+        },
       },
       required: ["text"],
     },
@@ -52,8 +62,9 @@ export function handleReply(
   access: AccessManager,
   recipient: string,
   text: string,
-  sendFn: (recipient: string, text: string) => Promise<void>,
+  sendFn: (recipient: string, text: string, attachments?: string[]) => Promise<void>,
   ownAccount?: string,
+  attachments?: string[],
 ) {
   if (!recipient || !text) {
     return Promise.resolve({
@@ -71,7 +82,7 @@ export function handleReply(
     });
   }
 
-  return sendFn(recipient, text).then(
+  return sendFn(recipient, text, attachments).then(
     () => ({
       content: [{ type: "text" as const, text: `Message sent to ${recipient}` }],
     }),
@@ -158,6 +169,7 @@ const INSTRUCTIONS = [
   'Inbound messages from Signal arrive as <channel source="signal" sender="..." sender_name="...">.',
   "Use the reply tool to respond to inbound messages (pass the sender from the tag as recipient).",
   "Use the send tool to proactively message the user's phone.",
+  "Both tools accept an optional attachments array of absolute file paths — use it to send images (charts, screenshots); they display inline in Signal.",
   "Always reply to acknowledge inbound messages, even if briefly.",
   "",
   "Access is managed by the /signal:access skill — the user runs it in their terminal.",
@@ -198,7 +210,8 @@ async function main() {
 
     if (name === "send") {
       try {
-        await tcp.send(config.signalAccount, args?.text as string, config.signalAccount);
+        await tcp.send(config.signalAccount, args?.text as string, config.signalAccount,
+          args?.attachments as string[] | undefined);
         return { content: [{ type: "text", text: "Message sent to your phone" }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${err}` }], isError: true };
@@ -210,10 +223,11 @@ async function main() {
         access,
         args?.recipient as string,
         args?.text as string,
-        async (recipient, text) => {
-          await tcp.send(recipient, text, config.signalAccount);
+        async (recipient, text, attachments) => {
+          await tcp.send(recipient, text, config.signalAccount, attachments);
         },
         config.signalAccount,
+        args?.attachments as string[] | undefined,
       );
     }
 

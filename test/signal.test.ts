@@ -12,6 +12,7 @@ describe("Reply tool schema", () => {
     assert.equal(schema.name, "reply");
     assert.ok(schema.inputSchema.properties.recipient);
     assert.ok(schema.inputSchema.properties.text);
+    assert.ok(schema.inputSchema.properties.attachments);
     assert.deepEqual(schema.inputSchema.required, ["recipient", "text"]);
   });
 });
@@ -34,6 +35,30 @@ describe("handleReply", () => {
     const result = await handleReply(access, "+9999999999", "Hello", async () => {});
     assert.equal(result.isError, true);
     assert.ok(result.content[0].text.includes("not in the sender allowlist"));
+  });
+
+  it("passes attachments through to sendFn", async () => {
+    let gotAttachments: string[] | undefined;
+    const result = await handleReply(
+      access,
+      "+1111111111",
+      "chart",
+      async (_r, _t, attachments) => {
+        gotAttachments = attachments;
+      },
+      undefined,
+      ["/tmp/chart.png"],
+    );
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(gotAttachments, ["/tmp/chart.png"]);
+  });
+
+  it("omits attachments when not provided", async () => {
+    let gotAttachments: string[] | undefined = ["sentinel"];
+    await handleReply(access, "+1111111111", "hi", async (_r, _t, attachments) => {
+      gotAttachments = attachments;
+    });
+    assert.equal(gotAttachments, undefined);
   });
 
   it("allows reply to allowed recipient", async () => {

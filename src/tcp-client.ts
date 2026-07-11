@@ -168,12 +168,13 @@ export class SignalTcpClient extends EventEmitter {
     this.socket?.write(req + "\n");
   }
 
-  async send(recipient: string, message: string, account?: string): Promise<unknown> {
+  async send(recipient: string, message: string, account?: string, attachments?: string[]): Promise<unknown> {
     const params: Record<string, unknown> = {
       recipient: [recipient],
       message,
     };
     if (account) params.account = account;
+    if (attachments && attachments.length > 0) params.attachments = attachments;
 
     const req = buildJsonRpcRequest("send", params);
     const parsed = JSON.parse(req);
