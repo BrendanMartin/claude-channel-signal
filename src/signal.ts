@@ -8,7 +8,36 @@ import { loadConfig } from "./config.js";
 import { AccessManager } from "./access.js";
 import { SignalTcpClient, type SignalMessage } from "./tcp-client.js";
 import { DaemonManager } from "./daemon.js";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
+import { resolve, sep } from "node:path";
+
+/**
+ * Canonicalize attachment paths and, if a root is configured, require every
+ * path to live inside it. realpathSync resolves symlinks and "..", so a
+ * malicious path can't escape the root; it also throws on missing files,
+ * which surfaces as a visible tool error instead of a mystery send failure.
+ */
+export function validateAttachments(
+  paths: string[] | undefined,
+  root: string,
+): string[] | undefined {
+  if (paths === undefined || paths === null) return undefined;
+  if (!Array.isArray(paths) || paths.some((p) => typeof p !== "string")) {
+    throw new Error("attachments must be an array of file path strings");
+  }
+  if (paths.length === 0) return undefined;
+  if (!root) return paths;
+  const rootReal = realpathSync(resolve(root));
+  return paths.map((p) => {
+    const real = realpathSync(resolve(p));
+    if (real !== rootReal && !real.startsWith(rootReal + sep)) {
+      throw new Error(
+        `Attachment ${p} is outside the allowed attachment root (${root})`,
+      );
+    }
+    return real;
+  });
+}
 
 export function getReplyToolSchema() {
   return {
@@ -24,6 +53,11 @@ export function getReplyToolSchema() {
         text: {
           type: "string",
           description: "The message to send",
+        },
+        attachments: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional absolute file paths to attach (images display inline)",
         },
       },
       required: ["recipient", "text"],
@@ -42,6 +76,11 @@ export function getSendToolSchema() {
           type: "string",
           description: "The message to send",
         },
+        attachments: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional absolute file paths to attach (images display inline)",
+        },
       },
       required: ["text"],
     },
@@ -52,8 +91,9 @@ export function handleReply(
   access: AccessManager,
   recipient: string,
   text: string,
-  sendFn: (recipient: string, text: string) => Promise<void>,
+  sendFn: (recipient: string, text: string, attachments?: string[]) => Promise<void>,
   ownAccount?: string,
+  attachments?: string[],
 ) {
   if (!recipient || !text) {
     return Promise.resolve({
@@ -71,7 +111,7 @@ export function handleReply(
     });
   }
 
-  return sendFn(recipient, text).then(
+  return sendFn(recipient, text, attachments).then(
     () => ({
       content: [{ type: "text" as const, text: `Message sent to ${recipient}` }],
     }),
@@ -150,6 +190,28 @@ export async function routeInboundMessage(
   }
 }
 
+/**
+ * Fire a read receipt for a message that reached the session transport.
+ * Honest guarantee: the channel notification was accepted by the MCP stdio
+ * transport — the closest observable point to "the session saw it"; it does
+ * not prove the model consumed the message. Never fired for own-account
+ * (Note-to-Self) messages, and callers only invoke this on the deliver path,
+ * so dropped/pairing-gated senders never get a receipt. If the sender
+ * identifier form ever differs from ownAccount's form (UUID vs E.164), the
+ * mismatch costs a harmless self-receipt — never a missed one.
+ * Fire-and-forget: a receipt failure is logged and cannot affect delivery.
+ */
+export function maybeSendReadReceipt(
+  msg: { sender: string; timestamp: number },
+  ownAccount: string,
+  sendReceiptFn: (recipient: string, targetTimestamp: number) => Promise<unknown>,
+): void {
+  if (!msg.sender || msg.sender === ownAccount) return;
+  sendReceiptFn(msg.sender, msg.timestamp).catch((err) =>
+    console.error(`[signal] read receipt failed: ${err}`),
+  );
+}
+
 const INSTRUCTIONS = [
   "This is a Signal messaging channel. The user can message you from their phone via Signal, and you can message them back.",
   "",
@@ -158,6 +220,7 @@ const INSTRUCTIONS = [
   'Inbound messages from Signal arrive as <channel source="signal" sender="..." sender_name="...">.',
   "Use the reply tool to respond to inbound messages (pass the sender from the tag as recipient).",
   "Use the send tool to proactively message the user's phone.",
+  "Both tools accept an optional attachments array of absolute file paths — use it to send images (charts, screenshots); they display inline in Signal.",
   "Always reply to acknowledge inbound messages, even if briefly.",
   "",
   "Access is managed by the /signal:access skill — the user runs it in their terminal.",
@@ -196,9 +259,21 @@ async function main() {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
+    let attachments: string[] | undefined;
+    try {
+      attachments = validateAttachments(
+        args?.attachments as string[] | undefined,
+        config.attachmentRoot,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+    }
+
     if (name === "send") {
       try {
-        await tcp.send(config.signalAccount, args?.text as string, config.signalAccount);
+        await tcp.send(config.signalAccount, args?.text as string, config.signalAccount,
+          attachments);
         return { content: [{ type: "text", text: "Message sent to your phone" }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${err}` }], isError: true };
@@ -210,10 +285,11 @@ async function main() {
         access,
         args?.recipient as string,
         args?.text as string,
-        async (recipient, text) => {
-          await tcp.send(recipient, text, config.signalAccount);
+        async (recipient, text, atts) => {
+          await tcp.send(recipient, text, config.signalAccount, atts);
         },
         config.signalAccount,
+        attachments,
       );
     }
 
@@ -235,6 +311,7 @@ async function main() {
             meta: { sender: m.sender, sender_name: m.senderName },
           },
         });
+        maybeSendReadReceipt(m, config.signalAccount, (r, t) => tcp.sendReceipt(r, t));
       },
       async (recipient, text) => {
         await tcp.send(recipient, text, config.signalAccount);

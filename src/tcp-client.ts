@@ -53,6 +53,26 @@ export function parseJsonRpcMessage(raw: string): SignalMessage | null {
   }
 }
 
+/**
+ * Params for signal-cli's sendReceipt RPC. NB: unlike send, sendReceipt
+ * requires recipient as a PLAIN STRING — the array form gets mis-parsed as a
+ * phone number and fails with UNREGISTERED_FAILURE (verified live against
+ * signal-cli 0.14.5).
+ */
+export function buildSendReceiptParams(
+  recipient: string,
+  targetTimestamp: number,
+  account?: string,
+): Record<string, unknown> {
+  const params: Record<string, unknown> = {
+    recipient,
+    targetTimestamp,
+    type: "read",
+  };
+  if (account) params.account = account;
+  return params;
+}
+
 export function buildJsonRpcRequest(
   method: string,
   params: Record<string, unknown>
@@ -75,7 +95,11 @@ export class SignalTcpClient extends EventEmitter {
   private buffer = "";
   private pending = new Map<string, PendingRequest>();
   private reconnectCount = 0;
-  private maxReconnects = 3;
+  // Never stop retrying: the daemon can take 15-20s (or longer, under its own
+  // crash-restart backoff) to come back, and a channel that gives up leaves
+  // Claude alive but permanently deaf — daemon up, subscription gone.
+  // Delay is already capped at 30s, so eternal retries are cheap.
+  private maxReconnects = Number.POSITIVE_INFINITY;
   private stopping = false;
   private account: string;
 
@@ -168,14 +192,27 @@ export class SignalTcpClient extends EventEmitter {
     this.socket?.write(req + "\n");
   }
 
-  async send(recipient: string, message: string, account?: string): Promise<unknown> {
+  async send(recipient: string, message: string, account?: string, attachments?: string[]): Promise<unknown> {
     const params: Record<string, unknown> = {
       recipient: [recipient],
       message,
     };
     if (account) params.account = account;
+    if (attachments && attachments.length > 0) params.attachments = attachments;
 
-    const req = buildJsonRpcRequest("send", params);
+    return this.request("send", params);
+  }
+
+  /** Mark an inbound message as read on the sender's device (filled check). */
+  async sendReceipt(recipient: string, targetTimestamp: number): Promise<unknown> {
+    return this.request(
+      "sendReceipt",
+      buildSendReceiptParams(recipient, targetTimestamp, this.account),
+    );
+  }
+
+  private request(method: string, params: Record<string, unknown>): Promise<unknown> {
+    const req = buildJsonRpcRequest(method, params);
     const parsed = JSON.parse(req);
     const id = parsed.id;
 
@@ -186,7 +223,7 @@ export class SignalTcpClient extends EventEmitter {
       setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
-          reject(new Error("Send timeout after 30s"));
+          reject(new Error(`${method} timeout after 30s`));
         }
       }, 30_000);
     });

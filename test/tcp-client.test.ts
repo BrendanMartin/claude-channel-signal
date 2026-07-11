@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseJsonRpcMessage, buildJsonRpcRequest } from "../src/tcp-client.js";
+import { buildSendReceiptParams } from "../src/tcp-client.js";
 
 describe("JSON-RPC parsing", () => {
   it("parses a receive notification", () => {
@@ -143,5 +144,21 @@ describe("JSON-RPC request building", () => {
     const parsed = JSON.parse(req);
     assert.equal(parsed.method, "subscribeReceive");
     assert.equal(parsed.params.account, "+1111111111");
+  });
+});
+
+describe("buildSendReceiptParams", () => {
+  it("uses a plain-string recipient (array form mis-parses in signal-cli)", () => {
+    const p = buildSendReceiptParams("uuid-or-number", 456, "+1999");
+    assert.equal(p.recipient, "uuid-or-number");
+    assert.ok(!Array.isArray(p.recipient));
+    assert.equal(p.targetTimestamp, 456);
+    assert.equal(p.type, "read");
+    assert.equal(p.account, "+1999");
+  });
+
+  it("omits account when not set", () => {
+    const p = buildSendReceiptParams("x", 1);
+    assert.equal("account" in p, false);
   });
 });
