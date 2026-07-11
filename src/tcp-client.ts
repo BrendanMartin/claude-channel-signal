@@ -180,7 +180,25 @@ export class SignalTcpClient extends EventEmitter {
     if (account) params.account = account;
     if (attachments && attachments.length > 0) params.attachments = attachments;
 
-    const req = buildJsonRpcRequest("send", params);
+    return this.request("send", params);
+  }
+
+  /** Mark an inbound message as read on the sender's device (filled check). */
+  async sendReceipt(recipient: string, targetTimestamp: number): Promise<unknown> {
+    // NB: unlike send, signal-cli's sendReceipt requires recipient as a plain
+    // string — an array gets mis-parsed as a phone number (verified live,
+    // signal-cli 0.14.5).
+    const params: Record<string, unknown> = {
+      recipient,
+      targetTimestamp,
+      type: "read",
+    };
+    if (this.account) params.account = this.account;
+    return this.request("sendReceipt", params);
+  }
+
+  private request(method: string, params: Record<string, unknown>): Promise<unknown> {
+    const req = buildJsonRpcRequest(method, params);
     const parsed = JSON.parse(req);
     const id = parsed.id;
 
@@ -191,7 +209,7 @@ export class SignalTcpClient extends EventEmitter {
       setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
-          reject(new Error("Send timeout after 30s"));
+          reject(new Error(`${method} timeout after 30s`));
         }
       }, 30_000);
     });

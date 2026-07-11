@@ -285,6 +285,13 @@ async function main() {
             meta: { sender: m.sender, sender_name: m.senderName },
           },
         });
+        // Mark as read only when actually delivered into the session —
+        // dropped or pairing-gated messages must not show a filled check.
+        if (m.sender !== config.signalAccount) {
+          tcp.sendReceipt(m.sender, m.timestamp).catch((err) =>
+            console.error(`[signal] read receipt failed: ${err}`),
+          );
+        }
       },
       async (recipient, text) => {
         await tcp.send(recipient, text, config.signalAccount);
