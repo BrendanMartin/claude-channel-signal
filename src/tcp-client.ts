@@ -75,7 +75,11 @@ export class SignalTcpClient extends EventEmitter {
   private buffer = "";
   private pending = new Map<string, PendingRequest>();
   private reconnectCount = 0;
-  private maxReconnects = 3;
+  // Never stop retrying: the daemon can take 15-20s (or longer, under its own
+  // crash-restart backoff) to come back, and a channel that gives up leaves
+  // Claude alive but permanently deaf — daemon up, subscription gone.
+  // Delay is already capped at 30s, so eternal retries are cheap.
+  private maxReconnects = Number.POSITIVE_INFINITY;
   private stopping = false;
   private account: string;
 
