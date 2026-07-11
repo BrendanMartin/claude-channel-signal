@@ -60,6 +60,7 @@ Environment variables (set in the `env` block of your MCP config in `~/.claude.j
 | `SIGNAL_CLI_PATH` | Path to signal-cli binary | `signal-cli` (on PATH) |
 | `SIGNAL_DAEMON_PORT` | TCP port for signal-cli daemon | `7583` |
 | `SIGNAL_PREFIX` | Only forward messages starting with this prefix | — (all messages) |
+| `SIGNAL_ATTACHMENT_ROOT` | If set, `reply`/`send` attachments must be files inside this directory (paths are canonicalized, so symlinks/`..` can't escape it) | — (no restriction) |
 
 ### Prefix filtering
 

@@ -8,7 +8,32 @@ import { loadConfig } from "./config.js";
 import { AccessManager } from "./access.js";
 import { SignalTcpClient, type SignalMessage } from "./tcp-client.js";
 import { DaemonManager } from "./daemon.js";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
+import { resolve, sep } from "node:path";
+
+/**
+ * Canonicalize attachment paths and, if a root is configured, require every
+ * path to live inside it. realpathSync resolves symlinks and "..", so a
+ * malicious path can't escape the root; it also throws on missing files,
+ * which surfaces as a visible tool error instead of a mystery send failure.
+ */
+export function validateAttachments(
+  paths: string[] | undefined,
+  root: string,
+): string[] | undefined {
+  if (!paths || paths.length === 0) return undefined;
+  if (!root) return paths;
+  const rootReal = realpathSync(resolve(root));
+  return paths.map((p) => {
+    const real = realpathSync(resolve(p));
+    if (real !== rootReal && !real.startsWith(rootReal + sep)) {
+      throw new Error(
+        `Attachment ${p} is outside the allowed attachment root (${root})`,
+      );
+    }
+    return real;
+  });
+}
 
 export function getReplyToolSchema() {
   return {
@@ -208,10 +233,21 @@ async function main() {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
+    let attachments: string[] | undefined;
+    try {
+      attachments = validateAttachments(
+        args?.attachments as string[] | undefined,
+        config.attachmentRoot,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+    }
+
     if (name === "send") {
       try {
         await tcp.send(config.signalAccount, args?.text as string, config.signalAccount,
-          args?.attachments as string[] | undefined);
+          attachments);
         return { content: [{ type: "text", text: "Message sent to your phone" }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${err}` }], isError: true };
@@ -223,11 +259,11 @@ async function main() {
         access,
         args?.recipient as string,
         args?.text as string,
-        async (recipient, text, attachments) => {
-          await tcp.send(recipient, text, config.signalAccount, attachments);
+        async (recipient, text, atts) => {
+          await tcp.send(recipient, text, config.signalAccount, atts);
         },
         config.signalAccount,
-        args?.attachments as string[] | undefined,
+        attachments,
       );
     }
 

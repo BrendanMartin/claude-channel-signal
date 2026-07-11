@@ -1,9 +1,9 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { join, basename } from "node:path";
 import { tmpdir } from "node:os";
-import { getReplyToolSchema, handleReply, gate, routeInboundMessage } from "../src/signal.js";
+import { getReplyToolSchema, handleReply, gate, routeInboundMessage, validateAttachments } from "../src/signal.js";
 import { AccessManager } from "../src/access.js";
 
 describe("Reply tool schema", () => {
@@ -14,6 +14,65 @@ describe("Reply tool schema", () => {
     assert.ok(schema.inputSchema.properties.text);
     assert.ok(schema.inputSchema.properties.attachments);
     assert.deepEqual(schema.inputSchema.required, ["recipient", "text"]);
+  });
+});
+
+describe("validateAttachments", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "attach-root-"));
+    writeFileSync(join(root, "chart.png"), "png");
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true });
+  });
+
+  it("passes paths through untouched when no root is configured", () => {
+    assert.deepEqual(validateAttachments(["/anywhere/x.png"], ""), ["/anywhere/x.png"]);
+  });
+
+  it("returns undefined for empty input", () => {
+    assert.equal(validateAttachments(undefined, root), undefined);
+    assert.equal(validateAttachments([], root), undefined);
+  });
+
+  it("accepts a file inside the root", () => {
+    const out = validateAttachments([join(root, "chart.png")], root);
+    assert.equal(out!.length, 1);
+    assert.ok(out![0].endsWith("chart.png"));
+  });
+
+  it("rejects a path that .. -escapes the root", () => {
+    const outside = mkdtempSync(join(tmpdir(), "attach-outside-"));
+    writeFileSync(join(outside, "secret.txt"), "s");
+    try {
+      assert.throws(
+        () => validateAttachments([join(root, "..", basename(outside), "secret.txt")], root),
+        /outside the allowed attachment root/,
+      );
+    } finally {
+      rmSync(outside, { recursive: true });
+    }
+  });
+
+  it("rejects a symlink pointing outside the root", () => {
+    const outside = mkdtempSync(join(tmpdir(), "attach-outside-"));
+    writeFileSync(join(outside, "secret.txt"), "s");
+    symlinkSync(join(outside, "secret.txt"), join(root, "innocent.png"));
+    try {
+      assert.throws(
+        () => validateAttachments([join(root, "innocent.png")], root),
+        /outside the allowed attachment root/,
+      );
+    } finally {
+      rmSync(outside, { recursive: true });
+    }
+  });
+
+  it("throws visibly on a missing file when a root is set", () => {
+    assert.throws(() => validateAttachments([join(root, "nope.png")], root));
   });
 });
 

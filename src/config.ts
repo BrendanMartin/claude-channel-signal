@@ -21,6 +21,7 @@ export interface Config {
   daemonPort: number;
   stateDir: string;
   prefix: string;
+  attachmentRoot: string;
 }
 
 export function loadConfig(): Config {
@@ -30,5 +31,9 @@ export function loadConfig(): Config {
     daemonPort: parseInt(process.env.SIGNAL_DAEMON_PORT ?? "7583", 10),
     stateDir: STATE_DIR,
     prefix: process.env.SIGNAL_PREFIX ?? "",
+    // If set, attachments may only come from inside this directory
+    // (paths are canonicalized first, so symlinks/.. can't escape it).
+    // Empty = no restriction.
+    attachmentRoot: process.env.SIGNAL_ATTACHMENT_ROOT ?? "",
   };
 }
